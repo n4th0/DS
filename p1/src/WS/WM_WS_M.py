@@ -2,7 +2,6 @@
 #
 
 
-
 """
 Aplicación que simula un módulo de gestión de observación de todo el WS (hardware y
 software) velando por la seguridad y correcto funcionamiento de este sin incidencias. El nombre
