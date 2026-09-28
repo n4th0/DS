@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 
-from protocol import send_frame, recv_frame, pack_message, unpack_message
+from protocol import accept_session, serve_one, pack_message, unpack_message
 
 try:
     import msvcrt
@@ -76,19 +76,25 @@ class WSEngine:
         raise NotImplementedError("se conectara cuando CENTRAL pueda solicitar riego")
 
     # protocolo con el Monitor
+    def _answer_monitor(self, request_msg: str) -> str:
+        op, _ = unpack_message(request_msg)
+        if op == "PING":
+            with self.fault_lock:
+                faulty = self.fault
+            return pack_message("KO" if faulty else "OK")
+        log(f"Peticion no reconocida del Monitor: {request_msg}")
+        return pack_message("UNKNOWN_OP")
+
     def handle_monitor(self, sock: socket.socket) -> None:
-        while True:
-            request = recv_frame(sock)
-            if request is None:
-                log("El Monitor cerro la conexion")
-                return
-            op, _ = unpack_message(request)
-            if op == "PING":
-                with self.fault_lock:
-                    faulty = self.fault
-                send_frame(sock, pack_message("KO" if faulty else "OK"))
-            else:
-                log(f"Peticion no reconocida del Monitor: {request}")
+        try:
+            accept_session(sock)                       # espera el ENQ del Monitor
+            while serve_one(sock, self._answer_monitor):
+                pass                                   # un PING -> una respuesta
+            log("El Monitor finalizo la sesion (EOT)")
+        except (ConnectionError, OSError) as exc:
+            log(f"Se perdio la conexion con el Monitor ({exc})")
+        finally:
+            sock.close()
 
     def run(self) -> None:
         threading.Thread(target=self.keyboard_listener, daemon=True).start()
