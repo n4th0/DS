@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY common /app/common
+COPY station /app/station
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app/station
+
+# WS_ID, KAFKA_BROKER, MONITOR_PORT come from env
+CMD ["sh", "-c", "python engine.py ${KAFKA_BROKER:-kafka:9092} 0.0.0.0 ${MONITOR_PORT:-6000} ${WS_ID:-WS-01}"]
