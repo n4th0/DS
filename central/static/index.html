@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WM_Central — Panel de monitorización</title>
+    <style>
+      :root {
+        --bg: #f3f5f8;
+        --card: #fff;
+        --line: #d9dee6;
+        --ink: #1c2430;
+        --mut: #6b7686;
+        --green: #8fd19e;
+        --green-d: #2e9e4f;
+        --red: #f0a3a3;
+        --red-d: #b3261e;
+        --orange: #f5c58a;
+        --orange-d: #a35a00;
+        --grey: #cfd3d9;
+        --grey-d: #555;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #10161d;
+          --card: #18212b;
+          --line: #2a3644;
+          --ink: #e6ebf1;
+          --mut: #8a97a8;
+          --green: #2e6b41;
+          --green-d: #7fe0a0;
+          --red: #6e2b2b;
+          --red-d: #ff9d96;
+          --orange: #6b4a1c;
+          --orange-d: #ffc47a;
+          --grey: #3a424d;
+          --grey-d: #c0c6ce;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          14px/1.4 system-ui,
+          Segoe UI,
+          Roboto,
+          sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: #16324f;
+        color: #fff;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      header .sys {
+        font-size: 12px;
+        opacity: 0.85;
+      }
+      main {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 260px;
+        gap: 14px;
+        padding: 14px;
+      }
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .card h2 {
+        margin: 0 0 8px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--mut);
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      button {
+        font: inherit;
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--card);
+        color: var(--ink);
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(0.95);
+      }
+      button.go {
+        border-color: var(--green-d);
+        color: var(--green-d);
+      }
+      button.stop {
+        border-color: var(--orange-d);
+        color: var(--orange-d);
+      }
+      button.act {
+        border-color: #2a6fb0;
+        color: #2a6fb0;
+      }
+      input[type="number"] {
+        width: 70px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--card);
+        color: var(--ink);
+      }
+      select {
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--card);
+        color: var(--ink);
+      }
+      .tablewrap {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--mut);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .st {
+        font-weight: 700;
+        text-align: center;
+        border-radius: 4px;
+        padding: 4px 8px;
+        min-width: 130px;
+        display: inline-block;
+      }
+      .AVAILABLE {
+        background: var(--green);
+        color: var(--green-d);
+      }
+      .WATERING {
+        background: var(--green);
+        color: var(--green-d);
+        animation: blink 1s steps(2, start) infinite;
+      }
+      .LEAK {
+        background: var(--red);
+        color: var(--red-d);
+      }
+      .OUT_OF_SERVICE {
+        background: var(--orange);
+        color: var(--orange-d);
+      }
+      .DISCONNECTED {
+        background: var(--grey);
+        color: var(--grey-d);
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0.35;
+        }
+      }
+      .sum div > div {
+        display: flex;
+        justify-content: space-between;
+        padding: 3px 0;
+        border-bottom: 1px dashed var(--line);
+      }
+      .legend span {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 2px;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      .legend div {
+        margin: 4px 0;
+      }
+      #log {
+        background: #0e1a24;
+        color: #cfe3f5;
+        font:
+          12px/1.5 ui-monospace,
+          Menlo,
+          Consolas,
+          monospace;
+        height: 260px;
+        overflow-y: auto;
+        padding: 8px;
+        border-radius: 6px;
+      }
+      #log .WARN {
+        color: #ffd27a;
+      }
+      #log .ERROR {
+        color: #ff8f87;
+      }
+      #log .t {
+        color: #7d93a8;
+      }
+      .full {
+        grid-column: 1 / -1;
+      }
+      #toast {
+        position: fixed;
+        right: 14px;
+        bottom: 14px;
+        background: #16324f;
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 6px;
+        display: none;
+        max-width: 420px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>WaterManagement · Panel de CENTRAL</h1>
+      <div class="sys" id="sys">conectando…</div>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Estaciones de riego (WS)</h2>
+        <div class="toolbar">
+          <label
+            >Duración (s)
+            <input type="number" id="dur" value="30" min="1" max="3600"
+          /></label>
+          <select id="target">
+            <option value="ALL">Todas las WS</option>
+          </select>
+          <button class="go" onclick="cmd('start')">Iniciar riego</button>
+          <button class="stop" onclick="cmd('block')">Bloquear WS</button>
+          <button class="act" onclick="cmd('activate')">Activar WS</button>
+        </div>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Ubicación</th>
+                <th>Estado</th>
+                <th>Caudal (L/min)</th>
+                <th>Acumulado (L)</th>
+                <th>Operario</th>
+                <th>Último riego</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <aside>
+        <section class="card sum">
+          <h2>Resumen</h2>
+          <div id="sum"></div>
+        </section>
+        <section class="card legend" style="margin-top: 14px">
+          <h2>Leyenda</h2>
+          <div>
+            <span style="background: var(--green)"></span>Disponible / Regando
+            (parpadeo)
+          </div>
+          <div><span style="background: var(--red)"></span>Fuga</div>
+          <div>
+            <span style="background: var(--orange)"></span>Fuera de servicio
+          </div>
+          <div><span style="background: var(--grey)"></span>Desconectada</div>
+        </section>
+      </aside>
+      <section class="card full">
+        <h2>Mensajes de la aplicación</h2>
+        <div id="log"></div>
+      </section>
+    </main>
+    <div id="toast"></div>
+    <script>
+      const ES = {
+        AVAILABLE: "Disponible",
+        WATERING: "Regando",
+        LEAK: "Fuga",
+        OUT_OF_SERVICE: "Fuera de Servicio",
+        DISCONNECTED: "Desconectada",
+      };
+      const fmt = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString() : "—");
+      const esc = (s) =>
+        String(s).replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      let lastSig = "";
+
+      async function refresh() {
+        try {
+          const r = await fetch("/api/state", { cache: "no-store" });
+          if (!r.ok) throw new Error(r.status);
+          const d = await r.json();
+          const sel = document.getElementById("target");
+          const cur = sel.value;
+          const ids = d.stations.map((s) => s.id);
+          const sig = ids.join(",");
+          if (sig !== lastSig) {
+            sel.innerHTML =
+              '<option value="ALL">Todas las WS</option>' +
+              ids.map((i) => `<option>${esc(i)}</option>`).join("");
+            sel.value = ids.includes(cur) || cur === "ALL" ? cur : "ALL";
+            lastSig = sig;
+          }
+          document.getElementById("rows").innerHTML =
+            d.stations
+              .map((s) => {
+                const w = s.state === "WATERING";
+                return `<tr><td><b>${esc(s.id)}</b></td><td>${esc(s.location)}</td>
+        <td><span class="st ${s.state}">${esc(ES[s.state])}</span></td>
+        <td>${w ? s.flow_lpm.toFixed(1) : "—"}</td><td>${w ? s.volume_l.toFixed(2) : "—"}</td>
+        <td>${w ? esc(s.operator_id) : "—"}</td><td>${fmt(s.last_watering)}</td>
+        <td><button class="go" onclick="one('start','${esc(s.id)}')">Regar</button></td></tr>`;
+              })
+              .join("") ||
+            '<tr><td colspan="8">No hay estaciones registradas todavía.</td></tr>';
+          document.getElementById("sum").innerHTML = Object.keys(ES)
+            .map(
+              (k) =>
+                `<div><span>${ES[k]}</span><b>${d.summary[k] || 0}</b></div>`,
+            )
+            .join("");
+          const sy = d.system;
+          document.getElementById("sys").textContent =
+            `CENTRAL activa · bus: ${sy.bus} · sockets :${sy.socket_port} · monitores ${sy.monitors_connected}/${sy.stations_registered} · uptime ${sy.uptime_s}s`;
+          const log = document.getElementById("log");
+          const atBottom =
+            log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+          log.innerHTML = d.messages
+            .map(
+              (m) =>
+                `<div class="${m.level}"><span class="t">${fmt(m.ts)}</span> [${esc(m.source)}] ${esc(m.msg)}</div>`,
+            )
+            .join("");
+          if (atBottom) log.scrollTop = log.scrollHeight;
+        } catch (e) {
+          document.getElementById("sys").textContent =
+            "Sin conexión con CENTRAL (" + e.message + ")";
+        }
+      }
+
+      function toast(t) {
+        const el = document.getElementById("toast");
+        el.textContent = t;
+        el.style.display = "block";
+        setTimeout(() => (el.style.display = "none"), 4500);
+      }
+      async function send(action, target) {
+        const duration = parseInt(
+          document.getElementById("dur").value || "30",
+          10,
+        );
+        const r = await fetch("/api/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, target, duration }),
+        });
+        const d = await r.json();
+        toast(d.ok ? d.results.join(" · ") : d.error || "error");
+        refresh();
+      }
+      const cmd = (action) =>
+        send(action, document.getElementById("target").value);
+      const one = (action, id) => send(action, id);
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>
