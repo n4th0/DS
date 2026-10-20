@@ -1,0 +1,39 @@
+# PC LAB 2 — estaciones de riego (Monitor + Engine). Configurar valores en .env (ver .env.example)
+#   docker compose -f docker-compose.lab-ws.yml --env-file .env up --build -d
+#   docker attach wm-engine-1        (menú del Engine; salir sin parar: Ctrl+P, Ctrl+Q)
+services:
+  monitor1:
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    container_name: wm-monitor-1
+    restart: unless-stopped
+    environment:
+      WM_CENTRAL: ${CENTRAL_SOCKET_ADDR}
+      WM_WS_ID: WS-01
+      WM_WS_LOCATION: "River Park"
+      WM_WS_SECRET: ${WS01_SECRET:-s3cret-1}
+  engine1:
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    container_name: wm-engine-1
+    restart: unless-stopped
+    depends_on: [monitor1]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "${KAFKA_PUBLIC_ADDR}", WM_MONITOR: "monitor1:7001" }
+
+  monitor2:
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    container_name: wm-monitor-2
+    restart: unless-stopped
+    environment:
+      WM_CENTRAL: ${CENTRAL_SOCKET_ADDR}
+      WM_WS_ID: WS-02
+      WM_WS_LOCATION: "Central Park"
+      WM_WS_SECRET: ${WS02_SECRET:-s3cret-2}
+  engine2:
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    container_name: wm-engine-2
+    restart: unless-stopped
+    depends_on: [monitor2]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "${KAFKA_PUBLIC_ADDR}", WM_MONITOR: "monitor2:7001" }

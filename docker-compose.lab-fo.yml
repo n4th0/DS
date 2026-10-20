@@ -1,0 +1,15 @@
+# PC LAB 1 — operarios de campo. Configurar valores en .env (ver .env.example)
+#   docker compose -f docker-compose.lab-fo.yml --env-file .env build
+#   docker compose -f docker-compose.lab-fo.yml --env-file .env run --rm fo1     (menú interactivo, o:)
+#   docker compose -f docker-compose.lab-fo.yml --env-file .env run --rm fo1 python WM_FO.py --file services/fo1.csv --no-menu
+services:
+  fo1:
+    build: { context: ., dockerfile: fo/Dockerfile }
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "${KAFKA_PUBLIC_ADDR}", WM_OPERATOR_ID: FO-01 }
+  fo2:
+    build: { context: ., dockerfile: fo/Dockerfile }
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "${KAFKA_PUBLIC_ADDR}", WM_OPERATOR_ID: FO-02 }

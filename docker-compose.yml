@@ -1,0 +1,24 @@
+services:
+  monitor:
+    image: wm-monitor
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    networks: [wm-net]
+    environment:
+      WM_CENTRAL: ${CENTRAL_SOCKET_ADDR}
+      WM_WS_ID: ${WS_ID:-WS-01}
+      WM_WS_LOCATION: ${WS_LOCATION:-Unknown}
+      WM_WS_SECRET: ${WS_SECRET:-s3cret}
+
+  engine:
+    image: wm-engine
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    networks: [wm-net]
+    stdin_open: true
+    tty: true
+    environment:
+      KAFKA_BROKER: ${KAFKA_PUBLIC_ADDR}
+      WM_MONITOR: ${WM_MONITOR:-wm-monitor-1:7001}
+
+networks:
+  wm-net:
+    name: wm-net

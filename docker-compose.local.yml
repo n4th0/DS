@@ -1,0 +1,80 @@
+# Sistema COMPLETO en una sola máquina para probar antes de desplegar:
+#   docker compose -f docker-compose.local.yml up --build
+# Panel: http://localhost:8080  (admin / admin)
+# Controlar un Engine:  docker attach wm-engine-1   (salir sin parar: Ctrl+P, Ctrl+Q)
+# Lanzar un operario:   docker compose -f docker-compose.local.yml run --rm fo1
+services:
+  kafka:
+    build: { context: ., dockerfile: kafka/Dockerfile }
+    container_name: wm-kafka
+    environment:
+      KAFKA_INTERNAL_HOST: kafka
+      RAILWAY_TCP_PROXY_DOMAIN: localhost
+      RAILWAY_TCP_PROXY_PORT: "9094"
+    ports: ["9094:9094"]
+
+  central:
+    build: { context: ., dockerfile: central/Dockerfile }
+    container_name: wm-central
+    depends_on: [kafka]
+    environment:
+      KAFKA_BROKER: kafka:9092
+      PANEL_USER: admin
+      PANEL_PASSWORD: admin
+      WM_OPERATORS: FO-01,FO-02,FO-03,FO-04
+    ports: ["8080:8080", "9000:9000"]
+    volumes: ["central-data:/data"]
+
+  monitor1:
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    container_name: wm-monitor-1
+    depends_on: [central]
+    environment:
+      {
+        WM_CENTRAL: "central:9000",
+        WM_WS_ID: WS-01,
+        WM_WS_LOCATION: "River Park",
+        WM_WS_SECRET: s3cret-1,
+      }
+  engine1:
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    container_name: wm-engine-1
+    depends_on: [monitor1]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "kafka:9092", WM_MONITOR: "monitor1:7001" }
+
+  monitor2:
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    container_name: wm-monitor-2
+    depends_on: [central]
+    environment:
+      {
+        WM_CENTRAL: "central:9000",
+        WM_WS_ID: WS-02,
+        WM_WS_LOCATION: "Central Park",
+        WM_WS_SECRET: s3cret-2,
+      }
+  engine2:
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    container_name: wm-engine-2
+    depends_on: [monitor2]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "kafka:9092", WM_MONITOR: "monitor2:7001" }
+
+  fo1:
+    build: { context: ., dockerfile: fo/Dockerfile }
+    profiles: ["fo"]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "kafka:9092", WM_OPERATOR_ID: FO-01 }
+  fo2:
+    build: { context: ., dockerfile: fo/Dockerfile }
+    profiles: ["fo"]
+    stdin_open: true
+    tty: true
+    environment: { KAFKA_BROKER: "kafka:9092", WM_OPERATOR_ID: FO-02 }
+
+volumes:
+  central-data:

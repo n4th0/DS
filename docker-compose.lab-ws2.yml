@@ -1,0 +1,21 @@
+services:
+  monitor:
+    image: wm-monitor:local
+    build: { context: ., dockerfile: ws/Dockerfile.monitor }
+    restart: unless-stopped
+    environment:
+      WM_CENTRAL:       ${CENTRAL_SOCKET_ADDR}
+      WM_WS_ID:         ${WM_WS_ID:-WS-XX}
+      WM_WS_LOCATION:   ${WM_WS_LOCATION:-Unknown}
+      WM_WS_SECRET:     ${WM_WS_SECRET:-change-me}
+
+  engine:
+    image: wm-engine:local
+    build: { context: ., dockerfile: ws/Dockerfile.engine }
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      KAFKA_BROKER: ${KAFKA_PUBLIC_ADDR}
+      WM_MONITOR:   ${WM_MONITOR:-monitor:7001}
+
