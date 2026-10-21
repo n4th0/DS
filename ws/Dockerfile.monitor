@@ -1,0 +1,8 @@
+# Build context = raíz del repositorio. El Monitor solo usa sockets (sin dependencias externas).
+FROM python:3.11-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY wm_common ./wm_common
+COPY ws/WM_WS_M.py .
+EXPOSE 7001
+CMD ["python", "WM_WS_M.py"]
