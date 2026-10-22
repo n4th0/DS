@@ -1,0 +1,4 @@
+# WS_ID,duracion_segundos   (el operario espera 4 s entre servicios)
+WS-01,15
+WS-02,10
+WS-01,8
