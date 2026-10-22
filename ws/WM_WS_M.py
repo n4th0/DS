@@ -34,9 +34,9 @@ class Monitor:
         self.engine_port = engine_port
         self.lock = threading.Lock()
         self.running = True
-        self.token = None #token de sesión entregado por central
-        self.leak = False  # avería detectada localmente
-        self.reported_leak = None # lo último que central sabe
+        self.token = None            # token de sesión entregado por CENTRAL
+        self.leak = False            # avería detectada localmente
+        self.reported_leak = None    # lo último que CENTRAL sabe
         self.engine_conn = None
         self.engine_connected = False
         self.srv = None
@@ -62,7 +62,7 @@ class Monitor:
             except Exception:
                 pass
 
-    # enlace con CENTRAL
+    # ------------------------------------------------------------ enlace con CENTRAL
     def _central_loop(self):
         while self.running:
             ch = None
@@ -112,7 +112,7 @@ class Monitor:
                     return
                 time.sleep(0.2)
 
-    # enlace con el Engine
+    # ------------------------------------------------------------ enlace con el Engine
     def _engine_accept_loop(self):
         while self.running:
             try:
