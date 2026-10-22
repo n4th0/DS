@@ -1,0 +1,9 @@
+# Build context = raíz del repositorio. Ejecutar con: docker run -it ...  (menú por teclado)
+FROM python:3.11-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY ws/requirements-engine.txt .
+RUN pip install --no-cache-dir -r requirements-engine.txt
+COPY wm_common ./wm_common
+COPY ws/WM_WS_E.py .
+CMD ["python", "WM_WS_E.py"]
