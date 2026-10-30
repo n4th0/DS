@@ -1,0 +1,23 @@
+name: Build and Push central
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'central/**'
+      - 'wm_common/**'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: central/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/wm-central:latest
