@@ -7,6 +7,7 @@ WM_WS_M - Monitor de la Watering Station.
 * Ofrece un servidor de sockets al Engine (WM_WS_E): le entrega la identidad (ID + token de sesión)
   y le pregunta cada segundo por su salud (HEALTH). Si el Engine contesta KO o no contesta,
   comunica la AVERÍA (fuga) a CENTRAL; cuando se recupera, comunica la reparación.
+* En cada HEALTH informa además al Engine del estado de CENTRAL (UP/DOWN) para que pueda mostrarlo.
 
 Uso:
     python WM_WS_M.py --engine-port 7001 --central IP:PUERTO --id WS-01 --location "Central Park"
@@ -34,7 +35,7 @@ class Monitor:
         self.engine_port = engine_port
         self.lock = threading.Lock()
         self.running = True
-        self.token = None            # token de sesión entregado por CENTRAL
+        self.token = None            # token de sesión entregado por CENTRAL (None = CENTRAL inalcanzable)
         self.leak = False            # avería detectada localmente
         self.reported_leak = None    # lo último que CENTRAL sabe
         self.engine_conn = None
@@ -61,6 +62,11 @@ class Monitor:
                 s.close()
             except Exception:
                 pass
+
+    @property
+    def central_up(self):
+        """CENTRAL se considera disponible mientras haya sesión (token) activa."""
+        return self.token is not None
 
     # ------------------------------------------------------------ enlace con CENTRAL
     def _central_loop(self):
@@ -157,7 +163,8 @@ class Monitor:
                 t0 = time.time()
                 with self.lock:
                     token = self.token or "-"
-                ans = proto.request(ch, f"HEALTH#{self.ws_id}#{token}")
+                    central = "UP" if self.token else "DOWN"
+                ans = proto.request(ch, f"HEALTH#{self.ws_id}#{token}#{central}")
                 self._set_health(ans == "OK", "el Engine reporta KO")
                 time.sleep(max(0.0, 1.0 - (time.time() - t0)))
         except (proto.ProtocolError, OSError) as e:
