@@ -4,11 +4,12 @@
 WM_WS_E - Engine de la Watering Station (caudalímetro + electroválvula simulados).
 
 * Conecta por sockets con su Monitor (WM_WS_M): recibe su ID y token de sesión (validados por CENTRAL)
-  y responde cada segundo a las comprobaciones de salud (OK/KO).
+  y responde cada segundo a las comprobaciones de salud (OK/KO). El Monitor le indica además si
+  CENTRAL está disponible (UP/DOWN) y el Engine lo muestra por consola.
 * Recibe órdenes de CENTRAL por Kafka (START/STOP/BLOCK/UNBLOCK) y envía telemetría
   (STATUS cada 2 s, TICK cada segundo regando, STARTED, ENDED).
 * Menú por teclado (stdin):  s [seg] = regar manualmente | e = finalizar riego |
-  k = simular/quitar FUGA (KO al monitor) | h = ayuda | q = salir.
+  k = simular/quitar FUGA (KO al monitor) | c = estado de CENTRAL | h = ayuda | q = salir.
 
 Uso:
     python WM_WS_E.py --broker IP:PUERTO --monitor IP:PUERTO
@@ -32,7 +33,7 @@ from wm_common.bus import get_bus                          # noqa: E402
 from wm_common.util import env, is_stale, parse_hostport, say  # noqa: E402
 
 HELP = ("Comandos:  s [segundos] = regar manualmente | e = finalizar riego | "
-        "k = simular/quitar FUGA | h = ayuda | q = salir")
+        "k = simular/quitar FUGA | c = estado de CENTRAL | h = ayuda | q = salir")
 
 
 class Engine:
@@ -52,9 +53,38 @@ class Engine:
         self.ko = False
         self.blocked = False
         self.watering = None
+        self.central_ok = None           # None = desconocido, True = disponible, False = caído
+        self.central_since = time.time()
 
     def say(self, msg):
         say(f"ENGINE {self.ws_id or '?'}", msg)
+
+    # ------------------------------------------------------------------ estado de CENTRAL
+    def set_central(self, up, why=""):
+        """Actualiza el estado de CENTRAL y lo notifica solo cuando cambia."""
+        with self.lock:
+            if self.central_ok is up:
+                return
+            self.central_ok = up
+            self.central_since = time.time()
+            w = self.watering
+        if up:
+            self.say(f"*** CENTRAL DISPONIBLE *** {why}".rstrip())
+        elif up is False:
+            self.say(f"*** CENTRAL CAÍDO *** {why}".rstrip())
+            if w:
+                self.say("Hay un riego en curso: continúa hasta su fin, pero CENTRAL no recibe la telemetría")
+        else:
+            self.say("Estado de CENTRAL desconocido (sin enlace con el Monitor)")
+        self._send_status()
+
+    def _warn_central(self):
+        """Recordatorio periódico mientras no haya conexión confirmada con CENTRAL."""
+        secs = time.time() - self.central_since
+        if self.central_ok is False:
+            self.say(f"!!! SIN CONEXIÓN CON CENTRAL desde hace {secs:.0f} s !!!")
+        else:
+            self.say(f"!!! SIN CONEXIÓN CON CENTRAL (sin enlace con el Monitor, {secs:.0f} s) !!!")
 
     # ------------------------------------------------------------------ arranque
     def start(self):
@@ -78,10 +108,14 @@ class Engine:
             try:
                 self._session()
             except (proto.ProtocolError, OSError) as e:
-                self.say(f"Enlace con el Monitor perdido: {e}")
+                if "NOT_REGISTERED" not in str(e):
+                    self.say(f"Enlace con el Monitor perdido: {e}")
             except Exception:
                 self.say("Error inesperado en el enlace:\n" + traceback.format_exc())
+            was_linked = self.link_ok
             self.link_ok = False
+            if was_linked:
+                self.set_central(None)
             with self.lock:
                 w = self.watering
             if w:
@@ -100,6 +134,8 @@ class Engine:
             ans = proto.request(ch, "HELLO#WM_WS_E")
             parts = ans.split("#")
             if parts[0] != "HELLO_OK" or len(parts) < 3:
+                if "NOT_REGISTERED" in ans:
+                    self.set_central(False, "(el Monitor no está autenticado en CENTRAL)")
                 raise proto.ProtocolError(f"el Monitor no está listo ({ans})")
             self.ws_id, self.token = parts[1], parts[2]
             self.say("Identidad recibida del Monitor (validada por CENTRAL)")
@@ -112,6 +148,8 @@ class Engine:
                 if p[0] == "HEALTH":
                     if len(p) > 2 and p[2] != "-":
                         self.token = p[2]          # CENTRAL pudo haber renovado el token
+                    if len(p) > 3 and p[3] in ("UP", "DOWN"):
+                        self.set_central(p[3] == "UP", "(informado por el Monitor)")
                     proto.send_answer(ch, "KO" if self.ko else "OK")
                 else:
                     proto.send_answer(ch, "ERR#UNKNOWN_OP")
@@ -136,18 +174,23 @@ class Engine:
                          {"type": type_, "ws_id": self.ws_id, "token": self.token, **kw})
 
     def _send_status(self):
-        self._tele("STATUS", engine_state=self.state)
+        self._tele("STATUS", engine_state=self.state, central_ok=self.central_ok)
 
     def _status_loop(self):
+        last_warn = 0.0
         while self.running:
             if self.link_ok and self.subscribed:
                 self._send_status()
+            if self.central_ok is not True and time.time() - last_warn >= 5:
+                last_warn = time.time()
+                self._warn_central()
             time.sleep(2)
 
     # ------------------------------------------------------------------ órdenes de CENTRAL
     def _on_command(self, topic, key, m):
         if m.get("ws_id") != self.ws_id or is_stale(m, self.ttl):
             return
+        self.set_central(True, "(orden recibida por Kafka)")
         cmd = m.get("cmd")
         if cmd == "START":
             self._cmd_start(m)
@@ -223,6 +266,8 @@ class Engine:
         if not (self.ws_id and self.link_ok):
             self.say("Sin identidad/enlace con el Monitor: no se puede solicitar riego")
             return
+        if self.central_ok is False:
+            self.say("CENTRAL está caído: la petición puede no ser atendida")
         self.say("Solicitando riego manual a CENTRAL ...")
         self._tele("START_REQ", operator_id="LOCAL", duration_s=seconds or self.default_duration)
 
@@ -246,6 +291,10 @@ class Engine:
             self.say("Fuga reparada: el Engine vuelve a responder OK")
         self._send_status()
 
+    def show_central(self):
+        est = {True: "DISPONIBLE", False: "CAÍDO", None: "DESCONOCIDO"}[self.central_ok]
+        self.say(f"CENTRAL {est} desde hace {time.time() - self.central_since:.0f} s")
+
     def console_loop(self):
         print(HELP, flush=True)
         while self.running:
@@ -260,6 +309,8 @@ class Engine:
                 self.manual_end()
             elif cmd == "k":
                 self.toggle_ko()
+            elif cmd == "c":
+                self.show_central()
             elif cmd == "q":
                 self.running = False
                 os._exit(0)
