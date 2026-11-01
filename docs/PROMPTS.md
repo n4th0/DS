@@ -1,0 +1,4 @@
+*Adjuntado enunciado y código de WM_Central.py, WM_WS_E.py y WM_WS_M.py* "Por favor elabora en html una interfaz que satisfaga los requisitos definidos en el enunciado siguiendo la funcionalidad del código proporcionado"
+*Varios prompts con diferentes ficheros adjuntos* "Dado este código, sin cambiar nada sobre el mismo, añade comentarios para la claridad del código y documenta las principales funcionalidades de los módulos"
+*Tanto para el aprendizaje y comprensión del uso de Railway como AWS* "Tengo un proyecto que quiero hostear a través de Railway/AWS, por favor elabora una guia paso a paso del proceso que debería seguir"
+*Para el desarrollo del protocolo auxiliar, el bus y las utilidades comunes* "Estoy realizando un proyecto mediante sockets y necesito definir un protocolo para le mensajería y el empaquetado. Qué formato recomiendas?"
