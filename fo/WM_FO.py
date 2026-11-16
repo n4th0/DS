@@ -31,6 +31,11 @@ from wm_common import topics as T
 from wm_common.bus import get_bus
 from wm_common.util import env, is_stale, say
 
+IDLE_TIMEOUT = 30.0         # s sin ninguna noticia de CENTRAL para dar por perdida una petición
+SUSPENDED_TIMEOUT = 1800.0  # s máx. de espera con el riego interrumpido (fuga) o la WS sin Monitor
+SUSPEND_TYPES = ("PAUSED", "DETACHED")                          # mensajes que "congelan" el timeout
+RESUME_TYPES = ("TICK", "ACCEPTED", "RESUMED", "REATTACHED")    # mensajes que lo reactivan
+
 STATE_ES = {"AVAILABLE": "Disponible", "WATERING": "Regando", "LEAK": "Fuga",
             "OUT_OF_SERVICE": "Fuera de servicio", "DISCONNECTED": "Desconectada"}
 
@@ -80,6 +85,14 @@ class FieldOperator:
         if m.get("operator_id") != self.op or is_stale(m, self.ttl):
             return
         t, ws, msg = m.get("type"), m.get("ws_id"), m.get("message", "")
+        with self.lock:
+            entry = self.pending.get(m.get("req_id"))
+        if entry:
+            entry["last"] = time.time()
+            if t in SUSPEND_TYPES:
+                entry["suspended"] = True
+            elif t in RESUME_TYPES:
+                entry["suspended"] = False
         if t == "INFO":
             self.say(f"CENTRAL: {msg}")
         elif t == "ACCEPTED":
@@ -89,31 +102,46 @@ class FieldOperator:
                      f"{m.get('elapsed_s')} s")
         elif t == "ALERT":
             self.say(f"⚠ ALERTA  {msg}")
+        elif t == "PAUSED":
+            self.say(f"⏸ INTERRUMPIDO  {msg}")
+        elif t == "RESUMED":
+            self.say(f"▶ REANUDADO  {msg}")
+        elif t == "DETACHED":
+            self.say(f"⚠ SIN ENLACE  {msg}")
+        elif t == "REATTACHED":
+            self.say(f"CENTRAL: {msg}")
         elif t == "DENIED":
             self.say(f"✘ DENEGADO  {msg}")
         elif t == "SUMMARY":
             self.say(f"RESUMEN  {msg}")
-        if t in ("DENIED", "SUMMARY"):
-            with self.lock:
-                entry = self.pending.get(m.get("req_id"))
-            if entry:
-                entry["result"] = t
-                entry["event"].set()
+        if t in ("DENIED", "SUMMARY") and entry:
+            entry["result"] = t
+            entry["event"].set()
 
     # acciones
     def request_watering(self, ws_id, duration=None, timeout=None):
         """Pide un riego y espera a su conclusión. -> 'SUMMARY' | 'DENIED' | 'TIMEOUT'"""
         duration = duration or self.default_duration
         req_id = uuid.uuid4().hex[:8]
-        entry = {"event": threading.Event(), "result": None}
+        entry = {"event": threading.Event(), "result": None, "last": time.time(), "suspended": False}
         with self.lock:
             self.pending[req_id] = entry
         self.say(f"Solicitando riego {req_id}: {ws_id} durante {duration} s ...")
         self.bus.publish(T.FO_REQUESTS, self.op,
                          {"req_id": req_id, "operator_id": self.op, "ws_id": ws_id, "duration_s": duration})
-        if not entry["event"].wait(timeout or duration + 30):
-            self.say("Sin conclusión de CENTRAL (timeout)")
-            entry["result"] = "TIMEOUT"
+        # Espera activa: el plazo se renueva con cada mensaje de CENTRAL y se congela mientras el riego esté
+        # interrumpido por una fuga (se reanudará) o la estación sin Monitor (informará al volver).
+        started = time.time()
+        while not entry["event"].wait(1.0):
+            now = time.time()
+            if timeout:
+                expired = now - started > timeout
+            else:
+                expired = now - entry["last"] > (SUSPENDED_TIMEOUT if entry["suspended"] else IDLE_TIMEOUT)
+            if expired:
+                self.say("Sin conclusión de CENTRAL (timeout)")
+                entry["result"] = "TIMEOUT"
+                break
         with self.lock:
             self.pending.pop(req_id, None)
         return entry["result"]

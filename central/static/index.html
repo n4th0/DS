@@ -233,6 +233,9 @@
       .full {
         grid-column: 1 / -1;
       }
+      .mut {
+        color: var(--mut);
+      }
       #toast {
         position: fixed;
         right: 14px;
@@ -275,7 +278,12 @@
                 <th>Ubicación</th>
                 <th>Estado</th>
                 <th>Caudal (L/min)</th>
-                <th>Acumulado (L)</th>
+                <th title="Riego en curso; al terminar queda el volumen del último riego">
+                  Acumulado (L)
+                </th>
+                <th title="Total regado por la estación desde su alta">
+                  Total estación (L)
+                </th>
                 <th>Operario</th>
                 <th>Último riego</th>
                 <th></th>
@@ -345,14 +353,24 @@
             d.stations
               .map((s) => {
                 const w = s.state === "WATERING";
+                const vol = s.volume_l == null ? "—" : s.volume_l.toFixed(2);
+                const volCell =
+                  s.volume_kind === "last"
+                    ? `<span class="mut" title="Volumen del último riego">${vol}</span>`
+                    : s.volume_kind === "paused"
+                      ? `<span title="Riego interrumpido por fuga: se reanudará al repararla">${vol} ⏸</span>`
+                      : s.volume_kind === "frozen"
+                        ? `<span title="Sin enlace con la estación: último dato recibido">${vol} ⚠</span>`
+                        : vol;
                 return `<tr><td><b>${esc(s.id)}</b></td><td>${esc(s.location)}</td>
         <td><span class="st ${s.state}">${esc(ES[s.state])}</span></td>
-        <td>${w ? s.flow_lpm.toFixed(1) : "—"}</td><td>${w ? s.volume_l.toFixed(2) : "—"}</td>
-        <td>${w ? esc(s.operator_id) : "—"}</td><td>${fmt(s.last_watering)}</td>
+        <td>${w ? s.flow_lpm.toFixed(1) : "—"}</td><td>${volCell}</td>
+        <td>${s.total_l.toFixed(2)}</td>
+        <td>${s.operator_id ? esc(s.operator_id) : "—"}</td><td>${fmt(s.last_watering)}</td>
         <td><button class="go" onclick="one('start','${esc(s.id)}')">Regar</button></td></tr>`;
               })
               .join("") ||
-            '<tr><td colspan="8">No hay estaciones registradas todavía.</td></tr>';
+            '<tr><td colspan="9">No hay estaciones registradas todavía.</td></tr>';
           document.getElementById("sum").innerHTML = Object.keys(ES)
             .map(
               (k) =>

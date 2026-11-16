@@ -8,6 +8,8 @@ WM_WS_E - Engine de la Watering Station (caudalímetro + electroválvula simulad
   CENTRAL está disponible (UP/DOWN) y el Engine lo muestra por consola.
 * Recibe órdenes de CENTRAL por Kafka (START/STOP/BLOCK/UNBLOCK) y envía telemetría
   (STATUS cada 2 s, TICK cada segundo regando, STARTED, ENDED).
+* Si el Monitor se cae, el Engine NO corta el riego: sigue cumpliendo las órdenes recibidas, guarda
+  lo que va ocurriendo (STARTED/ENDED/START_DENIED) y lo informa a CENTRAL cuando el Monitor vuelve.
 * Menú por teclado (stdin):  s [seg] = regar manualmente | e = finalizar riego |
   k = simular/quitar FUGA (KO al monitor) | c = estado de CENTRAL | h = ayuda | q = salir.
 
@@ -32,6 +34,8 @@ from wm_common import topics as T                          # noqa: E402
 from wm_common.bus import get_bus                          # noqa: E402
 from wm_common.util import env, is_stale, parse_hostport, say  # noqa: E402
 
+OFFLINE_TYPES = ("STARTED", "ENDED", "START_DENIED")   # eventos que se guardan mientras no hay Monitor
+
 HELP = ("Comandos:  s [segundos] = regar manualmente | e = finalizar riego | "
         "k = simular/quitar FUGA | c = estado de CENTRAL | h = ayuda | q = salir")
 
@@ -53,6 +57,7 @@ class Engine:
         self.ko = False
         self.blocked = False
         self.watering = None
+        self.pending = []                # eventos ocurridos sin enlace con el Monitor (se informan al volver)
         self.central_ok = None           # None = desconocido, True = disponible, False = caído
         self.central_since = time.time()
 
@@ -116,11 +121,11 @@ class Engine:
             self.link_ok = False
             if was_linked:
                 self.set_central(None)
-            with self.lock:
-                w = self.watering
-            if w:
-                self.say("Monitor perdido: cierro la electroválvula por seguridad")
-                self._end(w, "MONITOR_LOST")
+                with self.lock:
+                    w = self.watering
+                if w:
+                    self.say("Monitor perdido: el riego en curso CONTINÚA según la orden recibida; "
+                             "se informará de todo cuando el Monitor vuelva")
             for _ in range(10):
                 if not self.running:
                     return
@@ -141,6 +146,7 @@ class Engine:
             self.say("Identidad recibida del Monitor (validada por CENTRAL)")
             self._ensure_subscribed()
             self.link_ok = True
+            self._flush_pending()
             self._send_status()
             while self.running:
                 msg = proto.recv_request(ch)       # el Monitor pregunta; timeout => Monitor perdido
@@ -170,8 +176,26 @@ class Engine:
     def _tele(self, type_, **kw):
         if not self.ws_id:
             return
+        if not self.link_ok:
+            # Sin Monitor no hay token de sesión válido: lo importante se guarda y se informa al reconectar
+            if type_ in OFFLINE_TYPES:
+                with self.lock:
+                    self.pending.append({"type": type_, "at": time.time(), **kw})
+            return
         self.bus.publish(T.WS_TELEMETRY, self.ws_id,
                          {"type": type_, "ws_id": self.ws_id, "token": self.token, **kw})
+
+    def _flush_pending(self):
+        """Informa a CENTRAL (con el token nuevo que acaba de dar el Monitor) de lo ocurrido sin enlace."""
+        with self.lock:
+            pend, self.pending = self.pending, []
+        if not pend:
+            return
+        self.say(f"Informando a CENTRAL de {len(pend)} evento(s) ocurridos sin enlace con el Monitor")
+        for ev in pend:
+            ev = dict(ev)
+            type_, at = ev.pop("type"), ev.pop("at")
+            self._tele(type_, offline=True, at=at, **ev)
 
     def _send_status(self):
         self._tele("STATUS", engine_state=self.state, central_ok=self.central_ok)
@@ -229,7 +253,8 @@ class Engine:
             w = {"req_id": req, "operator_id": op, "duration": dur, "volume": 0.0,
                  "started": time.time(), "stop": threading.Event()}
             self.watering = w
-        self.say(f"Electroválvula ABIERTA: riego {req} solicitado por {op}, máx. {dur} s")
+        verb = "REANUDADO tras fuga" if m.get("resume") else "solicitado"
+        self.say(f"Electroválvula ABIERTA: riego {req} {verb} por {op}, máx. {dur} s")
         self._tele("STARTED", req_id=req, operator_id=op, duration_s=dur)
         threading.Thread(target=self._watering_loop, args=(w,), daemon=True).start()
 

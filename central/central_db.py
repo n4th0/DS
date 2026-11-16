@@ -1,4 +1,3 @@
-
 """Capa de persistencia de CENTRAL (SQLite)."""
 import hashlib
 import hmac
@@ -17,7 +16,9 @@ CREATE TABLE IF NOT EXISTS ws(
     blocked INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'DISCONNECTED',
     last_watering REAL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    total_volume_l REAL NOT NULL DEFAULT 0,
+    last_volume_l REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS operators(
     id TEXT PRIMARY KEY,
@@ -58,6 +59,25 @@ class CentralDB:
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self):
+        """Añade a una BD ya existente (creada antes de esta versión) las columnas de volumen
+        y las rellena con lo que ya hay en el histórico de riegos."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(ws)").fetchall()}
+        for name in ("total_volume_l", "last_volume_l"):
+            if name in cols:
+                continue
+            self.conn.execute(f"ALTER TABLE ws ADD COLUMN {name} REAL NOT NULL DEFAULT 0")
+            if name == "total_volume_l":
+                self.conn.execute(
+                    "UPDATE ws SET total_volume_l = COALESCE("
+                    "(SELECT SUM(volume_l) FROM waterings w WHERE w.ws_id = ws.id), 0)")
+            else:
+                self.conn.execute(
+                    "UPDATE ws SET last_volume_l = COALESCE("
+                    "(SELECT volume_l FROM waterings w WHERE w.ws_id = ws.id AND w.ended_at IS NOT NULL "
+                    "ORDER BY w.ended_at DESC LIMIT 1), 0)")
 
     def _run(self, sql, args=()):
         with self.lock:
@@ -103,6 +123,11 @@ class CentralDB:
 
     def set_last_watering(self, ws_id, ts):
         self._run("UPDATE ws SET last_watering=? WHERE id=?", (ts, ws_id))
+
+    def add_volume(self, ws_id, volume_l):
+        """Suma un riego terminado al total histórico de la estación y lo deja como 'último riego'."""
+        self._run("UPDATE ws SET total_volume_l = total_volume_l + ?, last_volume_l = ? WHERE id=?",
+                  (volume_l, volume_l, ws_id))
 
     # ---- riegos
     def start_watering(self, req_id, ws_id, operator_id, started_at):

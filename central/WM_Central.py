@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -51,6 +50,7 @@ REASON_ES = {
     "DISCONNECTED": "estación desconectada de CENTRAL",
     "MONITOR_LOST": "la estación perdió su monitor",
     "STOPPED": "detenido por CENTRAL",
+    "LEAK_TIMEOUT": "la fuga no se reparó a tiempo",
 }
 
 START_TIMEOUT = 8.0          # s que CENTRAL espera a que el Engine confirme el inicio
@@ -65,13 +65,17 @@ class Station:
         self.location = row["location"]
         self.blocked = bool(row["blocked"])
         self.last_watering = row["last_watering"]
+        self.total_l = row["total_volume_l"] or 0.0   # litros servidos desde el alta de la estación
+        self.last_l = row["last_volume_l"] or 0.0     # litros del último riego terminado
+        self.paused = None             # riego interrumpido por fuga, pendiente de reanudar (ver _end_request)
+        self.last_resume_try = 0.0
         self.connected = False
         self.leak = False
         self.token = None
         self.conn_id = None
         self.peer = None
         self.reserved = None           # {"req_id","operator_id","duration","timer"}
-        self.active = None             # {"req_id","operator_id","started","duration","volume","flow"}
+        self.active = None             # {"req_id","operator_id","started","duration","volume","flow","done_s","done_l",...}
         self.flow = 0.0
         self.volume = 0.0
         self.engine_state = None
@@ -83,13 +87,16 @@ class Station:
 
 class Central:
     def __init__(self, db_path, bus, hb_timeout=10.0, default_duration=30, ttl=60.0,
-                 allow_self_reg=True, operators=("FO-01", "FO-02", "FO-03", "FO-04")):
+                 allow_self_reg=True, operators=("FO-01", "FO-02", "FO-03", "FO-04"),
+                 pause_max=900.0, detach_max=300.0):
         self.db = CentralDB(db_path)
         self.bus = bus
         self.hb_timeout = hb_timeout
         self.default_duration = default_duration
         self.ttl = ttl
         self.allow_self_reg = allow_self_reg
+        self.pause_max = pause_max      # s máx. que un riego interrumpido por fuga espera a ser reanudado
+        self.detach_max = detach_max    # s máx. que CENTRAL espera el informe de una WS sin Monitor
         self.lock = threading.RLock()
         self.msg_lock = threading.Lock()
         self.messages = collections.deque(maxlen=300)
@@ -184,6 +191,7 @@ class Central:
             try:
                 with self.lock:
                     for st in self.stations.values():
+                        self._housekeeping(st)
                         self._publish_status(st)
             except Exception:
                 pass
@@ -253,6 +261,11 @@ class Central:
             st.last_engine_status = 0.0
             ctx["ws_id"] = ws_id
             self.log("INFO", "AUTH", f"{ws_id} AUTENTICADA y conectada ({ctx['peer']})")
+            a = st.active
+            if a:       # la estación siguió regando sin Monitor: su Engine informará de lo ocurrido
+                a.pop("detached_since", None)
+                self.notify(a["operator_id"], ws_id, a["req_id"], "REATTACHED",
+                            f"Comunicación con {ws_id} restablecida: CENTRAL recibirá el informe de lo regado sin enlace")
             self._state_changed(st)
             return f"REG_OK#{st.token}"
 
@@ -268,7 +281,14 @@ class Central:
             st.token = None
             st.conn_id = None
             self.log("WARN", ws_id, f"Monitor desconectado ({why})")
-            self._stop_watering(st, "DISCONNECTED", immediate=True)
+            a = st.active
+            if a:       # el riego NO se corta: el Engine sigue sus órdenes y lo informará al reconectar
+                a["detached_since"] = time.time()
+                self.log("WARN", ws_id, "El riego continúa en la estación (el Engine no depende del Monitor); "
+                                        "CENTRAL esperará su informe cuando el Monitor reconecte")
+                self.notify(a["operator_id"], ws_id, a["req_id"], "DETACHED",
+                            f"Se perdió la comunicación con {ws_id}: la estación sigue regando "
+                            "y el informe llegará cuando se restablezca")
             self._state_changed(st)
 
     # ------------------------------------------------------------------ Kafka
@@ -326,6 +346,8 @@ class Central:
                 return deny(f"Estación {ws_id} NO disponible (estado: {STATE_ES[state]})")
             if st.reserved:
                 return deny(f"Estación {ws_id} ocupada: hay otra activación en curso")
+            if st.paused:
+                return deny(f"Estación {ws_id} ocupada: hay un riego interrumpido pendiente de reanudar")
             if time.time() - st.last_engine_status > ENGINE_STATUS_MAX_AGE:
                 return deny(f"El Engine de {ws_id} no responde")
             timer = threading.Timer(START_TIMEOUT, self._reservation_timeout, (ws_id, req_id))
@@ -341,14 +363,23 @@ class Central:
             st.reserved["timer"].cancel()
             st.reserved = None
 
+    def _reservation_failed(self, st, res, msg):
+        """Una reserva no llegó a arrancar. Si era la reanudación de un riego, este sigue pendiente."""
+        if res.get("resume"):
+            st.paused = res["resume"]
+            self.notify(res["operator_id"], st.id, res["req_id"], "INFO",
+                        f"{msg}. El riego sigue pendiente y se reintentará")
+        else:
+            self.notify(res["operator_id"], st.id, res["req_id"], "DENIED", msg)
+
     def _reservation_timeout(self, ws_id, req_id):
         with self.lock:
             st = self.stations.get(ws_id)
             if not st or not st.reserved or st.reserved["req_id"] != req_id:
                 return
-            op = st.reserved["operator_id"]
+            res = st.reserved
             st.reserved = None
-        self.notify(op, ws_id, req_id, "DENIED", f"La estación {ws_id} no confirmó el inicio del riego (timeout)")
+            self._reservation_failed(st, res, f"La estación {ws_id} no confirmó el inicio del riego (timeout)")
 
     # ------------------------------------------------------------------ telemetría de las WS
     def on_telemetry(self, m):
@@ -367,6 +398,7 @@ class Central:
                 st.engine_state = m.get("engine_state")
                 st.last_engine_status = time.time()
                 self._reconcile(st)
+                self._try_resume(st)
             elif t == "START_REQ":
                 self.handle_activation(str(m.get("operator_id") or "LOCAL"), st.id, m.get("duration_s"),
                                        origin="LOCAL")
@@ -376,40 +408,55 @@ class Central:
                 res = st.reserved
                 if res and res["req_id"] == m.get("req_id"):
                     self._release(st)
-                    self.notify(res["operator_id"], st.id, res["req_id"], "DENIED",
-                                f"La estación {st.id} rechazó el riego: {REASON_ES.get(m.get('reason'), m.get('reason'))}")
+                    self._reservation_failed(
+                        st, res, f"La estación {st.id} rechazó el riego: {REASON_ES.get(m.get('reason'), m.get('reason'))}")
             elif t == "TICK":
                 self._on_tick(st, m)
             elif t == "ENDED":
                 a = st.active
                 if a and a["req_id"] == m.get("req_id"):
-                    self._finalize(st, m.get("reason", "?"), m.get("volume_l"), m.get("duration_s"))
+                    self._end_request(st, m.get("reason", "?"), m.get("volume_l"), m.get("duration_s"))
+
+    @staticmethod
+    def _new_active(req, op, started, duration, done_s=0.0, done_l=0.0):
+        """Riego en curso. `done_s`/`done_l` = lo ya servido en tramos anteriores (si se reanudó tras una fuga);
+        `volume` es siempre el acumulado de TODA la petición."""
+        return {"req_id": req, "operator_id": op, "started": started, "duration": duration,
+                "done_s": done_s, "done_l": done_l, "volume": done_l, "flow": 0.0,
+                "elapsed": done_s, "seg_started": time.time()}
 
     def _on_started(self, st, m):
         res = st.reserved
         if res and res["req_id"] == m.get("req_id"):
             self._release(st)
             op, req, dur = res["operator_id"], res["req_id"], res["duration"]
+            resume = res.get("resume")
         elif self._adopt(st, m):
             return
         else:
             self._publish_cmd(st, "STOP", reason="STOPPED")
             return
-        st.active = {"req_id": req, "operator_id": op, "started": time.time(), "duration": dur,
-                     "volume": 0.0, "flow": 0.0}
-        st.flow = st.volume = 0.0
-        self.db.start_watering(req, st.id, op, st.active["started"])
-        self.notify(op, st.id, req, "ACCEPTED",
-                    f"Riego AUTORIZADO en {st.id} ({st.location}). Válvula abierta, duración máx. {dur} s")
+        if resume:
+            st.active = self._new_active(req, op, resume["started"], resume["duration"],
+                                         resume["done_s"], resume["done_l"])
+            st.flow, st.volume = 0.0, resume["done_l"]
+            self.notify(op, st.id, req, "RESUMED",
+                        f"Riego REANUDADO en {st.id}: faltan {dur} s ({resume['done_l']:.2f} L ya servidos)")
+        else:
+            st.active = self._new_active(req, op, time.time(), dur)
+            st.flow = st.volume = 0.0
+            self.db.start_watering(req, st.id, op, st.active["started"])
+            self.notify(op, st.id, req, "ACCEPTED",
+                        f"Riego AUTORIZADO en {st.id} ({st.location}). Válvula abierta, duración máx. {dur} s")
         self._state_changed(st)
 
     def _adopt(self, st, m):
         """Un Engine que ya regaba (p. ej. tras reiniciar CENTRAL) se re-incorpora al estado."""
-        if st.active or st.leak or st.blocked or not m.get("req_id"):
+        if st.active or st.paused or st.leak or st.blocked or not m.get("req_id"):
             return False
         op = str(m.get("operator_id") or "?")
-        st.active = {"req_id": m["req_id"], "operator_id": op, "started": time.time(),
-                     "duration": int(m.get("duration_s") or 0), "volume": 0.0, "flow": 0.0}
+        st.active = self._new_active(m["req_id"], op, time.time(), int(m.get("duration_s") or 0))
+        st.flow = st.volume = 0.0
         self.db.start_watering(m["req_id"], st.id, op, st.active["started"])
         self.log("WARN", st.id, f"Riego en curso ({m['req_id']}) re-adoptado tras reinicio/reconexión")
         self._state_changed(st)
@@ -422,10 +469,11 @@ class Central:
                 self._publish_cmd(st, "STOP", reason="STOPPED")
             return
         a["flow"] = st.flow = float(m.get("flow_lpm", 0))
-        a["volume"] = st.volume = float(m.get("volume_l", 0))
+        a["volume"] = st.volume = a["done_l"] + float(m.get("volume_l", 0))     # acumulado de la petición
+        a["elapsed"] = a["done_s"] + float(m.get("elapsed_s") or 0)
         self.notify(a["operator_id"], st.id, a["req_id"], "TICK",
                     f"{st.id} regando", flow_lpm=round(st.flow, 1), volume_l=round(st.volume, 2),
-                    elapsed_s=m.get("elapsed_s"))
+                    elapsed_s=round(a["elapsed"]))
 
     def _reconcile(self, st):
         """Mantiene el Engine alineado con el bloqueo decidido por CENTRAL (persistente en BD)."""
@@ -447,46 +495,129 @@ class Central:
         else:
             self.log("INFO", st.id, "Avería resuelta: la estación vuelve a estar disponible")
         self._state_changed(st)
+        if not flag:
+            self._try_resume(st)
 
-    def _stop_watering(self, st, reason, immediate=False):
+    def _stop_watering(self, st, reason):
+        """Corta el riego en curso. Una fuga lo deja PAUSADO (se reanuda al repararla);
+        cualquier otro motivo (bloqueo, ...) lo da por terminado."""
         why = REASON_ES.get(reason, reason)
         if st.reserved:
             res = st.reserved
             self._release(st)
-            self.notify(res["operator_id"], st.id, res["req_id"], "DENIED", f"Activación cancelada: {why}")
+            if res.get("resume"):
+                st.paused = res["resume"]          # se cancela la reanudación; el riego sigue pendiente
+            else:
+                self.notify(res["operator_id"], st.id, res["req_id"], "DENIED", f"Activación cancelada: {why}")
+        if st.paused and reason != "LEAK":
+            self._close_paused(st, reason)
         a = st.active
         if a:
             self._publish_cmd(st, "STOP", reason=reason)
             self.notify(a["operator_id"], st.id, a["req_id"], "ALERT", f"Riego INTERRUMPIDO en {st.id}: {why}")
-            if immediate:
-                self._finalize(st, reason)
-            else:
-                t = threading.Timer(FINALIZE_FALLBACK, self._finalize_fallback, (st.id, a["req_id"], reason))
-                t.daemon = True
-                t.start()
+            t = threading.Timer(FINALIZE_FALLBACK, self._end_fallback, (st.id, a["req_id"], reason))
+            t.daemon = True
+            t.start()
 
-    def _finalize_fallback(self, ws_id, req_id, reason):
+    def _end_fallback(self, ws_id, req_id, reason):
         with self.lock:
             st = self.stations.get(ws_id)
             if st and st.active and st.active["req_id"] == req_id:
-                self._finalize(st, reason)
+                self._end_request(st, reason)
 
-    def _finalize(self, st, reason, volume=None, duration=None):
+    @staticmethod
+    def _totals(a, seg_l=None, seg_s=None):
+        """Litros y segundos de TODA la petición: tramos anteriores + el tramo que acaba de terminar."""
+        vol = a["done_l"] + (float(seg_l) if seg_l is not None else max(0.0, a["volume"] - a["done_l"]))
+        dur = a["done_s"] + (float(seg_s) if seg_s is not None else time.time() - a["seg_started"])
+        return vol, dur
+
+    def _end_request(self, st, reason, seg_l=None, seg_s=None):
+        """Termina el tramo de riego en curso. Si fue por una fuga y aún falta tiempo de lo pedido,
+        la petición queda PAUSADA recordando lo servido; en cualquier otro caso se cierra con su resumen."""
         a = st.active
         if not a:
             return
-        vol = a["volume"] if volume is None else float(volume)
-        dur = (time.time() - a["started"]) if duration is None else float(duration)
+        vol, dur = self._totals(a, seg_l, seg_s)
         st.active = None
         st.flow = st.volume = 0.0
+        remaining = a["duration"] - dur
+        if reason == "LEAK" and remaining >= 1:
+            st.paused = {"req_id": a["req_id"], "operator_id": a["operator_id"], "duration": a["duration"],
+                         "done_s": dur, "done_l": vol, "started": a["started"], "since": time.time()}
+            self.notify(a["operator_id"], st.id, a["req_id"], "PAUSED",
+                        f"Riego INTERRUMPIDO por fuga en {st.id} tras {vol:.2f} L y {dur:.0f} s. "
+                        f"Se reanudará al repararla: faltan {remaining:.0f} s de los {a['duration']} s pedidos")
+            self._state_changed(st)
+        else:
+            self._close_request(st, a["req_id"], a["operator_id"], vol, dur, reason)
+
+    def _close_paused(self, st, reason):
+        p, st.paused = st.paused, None
+        self._close_request(st, p["req_id"], p["operator_id"], p["done_l"], p["done_s"], reason)
+
+    def _close_request(self, st, req_id, operator_id, vol, dur, reason):
+        """Cierra definitivamente una petición: BD, totales de la estación y resumen al operario."""
         st.last_watering = time.time()
-        self.db.end_watering(a["req_id"], st.last_watering, dur, vol, reason)
+        st.last_l = vol
+        st.total_l += vol
+        self.db.end_watering(req_id, st.last_watering, dur, vol, reason)
         self.db.set_last_watering(st.id, st.last_watering)
+        self.db.add_volume(st.id, vol)
         why = REASON_ES.get(reason, reason)
-        self.notify(a["operator_id"], st.id, a["req_id"], "SUMMARY",
+        self.notify(operator_id, st.id, req_id, "SUMMARY",
                     f"Riego finalizado en {st.id}: {vol:.2f} L en {dur:.0f} s ({why})",
                     volume_l=round(vol, 2), duration_s=round(dur, 1), reason=reason)
         self._state_changed(st)
+
+    def _try_resume(self, st):
+        """Si hay un riego pausado por una fuga ya reparada, ordena a la estación servir lo que faltaba."""
+        p = st.paused
+        if not p or st.active or st.reserved or not st.connected or st.leak or st.blocked:
+            return
+        if st.engine_state in ("KO", "BLOCKED") or time.time() - st.last_engine_status > ENGINE_STATUS_MAX_AGE:
+            return
+        if time.time() - st.last_resume_try < 5:
+            return
+        st.last_resume_try = time.time()
+        remaining = int(round(p["duration"] - p["done_s"]))
+        if remaining < 1:
+            self._close_paused(st, "TIMEOUT")
+            return
+        timer = threading.Timer(START_TIMEOUT, self._reservation_timeout, (st.id, p["req_id"]))
+        timer.daemon = True
+        st.reserved = {"req_id": p["req_id"], "operator_id": p["operator_id"], "duration": remaining,
+                       "timer": timer, "resume": p}
+        st.paused = None
+        timer.start()
+        self.notify(p["operator_id"], st.id, p["req_id"], "INFO",
+                    f"Avería resuelta: reanudando el riego en {st.id} ({remaining} s restantes, "
+                    f"{p['done_l']:.2f} L ya servidos)")
+        self._publish_cmd(st, "START", req_id=p["req_id"], operator_id=p["operator_id"],
+                          duration_s=remaining, resume=True)
+
+    def _housekeeping(self, st):
+        """Cada 5 s: evita que un riego pendiente quede abierto para siempre."""
+        now = time.time()
+        p = st.paused
+        if p and now - p["since"] > self.pause_max:
+            self.log("WARN", st.id, f"La fuga no se reparó en {self.pause_max:.0f} s: se da por terminado el riego pendiente")
+            self._close_paused(st, "LEAK_TIMEOUT")
+        a = st.active
+        if a and not st.connected and now - a.get("detached_since", now) > self.detach_max:
+            self.log("WARN", st.id, f"Sin informe de la estación desde hace {self.detach_max:.0f} s: "
+                                    "se cierra el riego con los últimos datos recibidos")
+            self._end_request(st, "DISCONNECTED")
+
+    def _carry(self, st):
+        """Litros ya servidos de la petición en curso, pausada o pendiente de reanudar (0 si no hay)."""
+        if st.active:
+            return st.active["volume"]
+        if st.paused:
+            return st.paused["done_l"]
+        if st.reserved and st.reserved.get("resume"):
+            return st.reserved["resume"]["done_l"]
+        return 0.0
 
     # ------------------------------------------------------------------ órdenes desde el panel
     def command(self, action, target, duration=None):
@@ -531,11 +662,22 @@ class Central:
             for st in sorted(self.stations.values(), key=lambda s: s.id):
                 state = self.state_of(st)
                 counts[state] += 1
-                a = st.active
+                a, p, res = st.active, st.paused, st.reserved
+                resuming = bool(res and res.get("resume"))
+                carry = self._carry(st)
+                if a:
+                    kind = "live" if st.connected else "frozen"      # frozen = regando pero sin Monitor
+                elif p or resuming:
+                    kind = "paused"
+                else:
+                    kind = "last" if st.last_watering else None      # volumen del último riego, hasta el siguiente
+                op = a["operator_id"] if a else (p["operator_id"] if p else (res["operator_id"] if resuming else None))
                 rows.append({"id": st.id, "location": st.location, "state": state,
                              "flow_lpm": round(st.flow, 1) if a else None,
-                             "volume_l": round(st.volume, 2) if a else None,
-                             "operator_id": a["operator_id"] if a else None,
+                             "volume_l": (round(carry if kind != "last" else st.last_l, 2) if kind else None),
+                             "volume_kind": kind,
+                             "total_l": round(st.total_l + carry, 2),
+                             "operator_id": op,
                              "elapsed_s": round(time.time() - a["started"]) if a else None,
                              "last_watering": st.last_watering})
             connected = sum(1 for s in self.stations.values() if s.connected)
@@ -634,7 +776,9 @@ def main():
                       default_duration=int(env("WM_DEFAULT_DURATION", 30)),
                       ttl=float(env("WM_MSG_TTL", 60)),
                       allow_self_reg=env("WM_ALLOW_SELF_REGISTRATION", "true").lower() == "true",
-                      operators=operators)
+                      operators=operators,
+                      pause_max=float(env("WM_PAUSE_MAX", 900)),
+                      detach_max=float(env("WM_DETACH_MAX", 300)))
     central.start(args.socket_port)
 
     user, password = env("PANEL_USER", "admin"), env("PANEL_PASSWORD")
@@ -648,4 +792,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# trigger
